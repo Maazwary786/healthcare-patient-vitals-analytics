@@ -252,7 +252,7 @@ if measurements:
                     "numeric_value": "Average recorded value",
                 },
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("No records found for the selected date range.")
 else:
@@ -278,8 +278,7 @@ if not encounters.empty:
         y="Records",
         title="Encounters by type",
     )
-    st.plotly_chart(fig, use_container_width=True)
-
+    st.plotly_chart(fig, width="stretch")
     valid_durations = encounters.loc[
         encounters["duration_minutes"].notna()
         & (encounters["duration_minutes"] >= 0),
@@ -322,7 +321,7 @@ quality_snapshot = pd.DataFrame(
     ]
 )
 
-st.dataframe(quality_snapshot, hide_index=True, use_container_width=True)
+st.dataframe(quality_snapshot, hide_index=True,width="stretch")
 
 st.caption(
     "Dashboard data comes from one completed versioned snapshot. "

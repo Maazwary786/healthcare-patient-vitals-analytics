@@ -2,7 +2,9 @@
 """Build validated healthcare analytics tables and publish a versioned snapshot."""
 
 import hashlib
+import hmac
 import logging
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -58,17 +60,35 @@ VITALS = {
 }
 
 
-def patient_key(value):
-    """Create a deterministic pseudonymous patient key.
-
-    This hash is pseudonymization, not guaranteed anonymization.
-    """
+def pseudonymous_key(value, namespace):
+    """Create a deterministic, keyed pseudonymous identifier."""
     if pd.isna(value):
         return None
 
-    return hashlib.sha256(
-        str(value).encode("utf-8")
+    secret = os.environ.get("HEALTHCARE_ID_SECRET")
+    if not secret or not secret.strip():
+        raise RuntimeError(
+            "HEALTHCARE_ID_SECRET environment variable is required. "
+            "Set it before running the analytics pipeline."
+        )
+
+    message = f"{namespace}:{value}".encode("utf-8")
+
+    return hmac.new(
+        secret.encode("utf-8"),
+        message,
+        hashlib.sha256,
     ).hexdigest()
+
+
+def patient_key(value):
+    """Create a pseudonymous patient key."""
+    return pseudonymous_key(value, "patient")
+
+
+def encounter_key(value):
+    """Create a pseudonymous encounter key."""
+    return pseudonymous_key(value, "encounter")
 
 
 def validate_patient_references(
@@ -92,7 +112,7 @@ def validate_patient_references(
 def build_patient_dimension(
     patients: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Build the patient dimension with a limited set of attributes."""
+    """Build the patient dimension with limited attributes."""
     patient_dim = patients[
         ["Id", "BIRTHDATE", "GENDER", "RACE", "ETHNICITY"]
     ].copy()
@@ -139,6 +159,7 @@ def build_vitals_fact(
     )
 
     obs["patient_key"] = obs["PATIENT"].map(patient_key)
+    obs["encounter_key"] = obs["ENCOUNTER"].map(encounter_key)
 
     vitals = obs.loc[
         obs["measurement"].notna()
@@ -148,19 +169,14 @@ def build_vitals_fact(
         [
             "event_time",
             "patient_key",
-            "ENCOUNTER",
+            "encounter_key",
             "measurement",
             "numeric_value",
             "UNITS",
         ],
     ].copy()
 
-    vitals = vitals.rename(
-        columns={
-            "ENCOUNTER": "source_encounter_id",
-            "UNITS": "unit",
-        }
-    )
+    vitals = vitals.rename(columns={"UNITS": "unit"})
 
     if vitals.empty:
         raise DataQualityError(
@@ -184,6 +200,7 @@ def build_encounters_fact(
     df = encounters.copy()
 
     df["patient_key"] = df["PATIENT"].map(patient_key)
+    df["encounter_key"] = df["Id"].map(encounter_key)
 
     df["START"] = pd.to_datetime(
         df["START"],
@@ -203,7 +220,7 @@ def build_encounters_fact(
 
     result = df[
         [
-            "Id",
+            "encounter_key",
             "patient_key",
             "START",
             "STOP",
@@ -215,7 +232,6 @@ def build_encounters_fact(
         ]
     ].rename(
         columns={
-            "Id": "source_encounter_id",
             "START": "start_time",
             "STOP": "end_time",
             "ENCOUNTERCLASS": "encounter_class",
@@ -225,18 +241,16 @@ def build_encounters_fact(
         }
     )
 
-    if result["source_encounter_id"].isna().any():
+    if result["encounter_key"].isna().any():
         raise DataQualityError(
-            "Encounter fact contains missing encounter IDs"
+            "Encounter fact contains missing encounter keys"
         )
 
-    if result["source_encounter_id"].duplicated().any():
+    if result["encounter_key"].duplicated().any():
         raise DataQualityError(
-            "Encounter fact contains duplicate encounter IDs"
+            "Encounter fact contains duplicate encounter keys"
         )
 
-    # Missing STOP timestamps can be valid for ongoing encounters.
-    # Negative durations, however, indicate inconsistent timestamps.
     negative_duration = result["duration_minutes"] < 0
 
     if negative_duration.fillna(False).any():
@@ -287,7 +301,7 @@ def main() -> None:
         vitals = build_vitals_fact(observations)
         encounter_fact = build_encounters_fact(encounters)
 
-        # Validate foreign keys before publishing.
+        # Validate patient foreign keys before publishing.
         known_patient_keys = set(patient_dim["patient_key"])
 
         for name, df in {
@@ -318,7 +332,8 @@ def main() -> None:
         )
 
         logger.info(
-            "Analytics build successful: patients=%d, vitals=%d, encounters=%d",
+            "Analytics build successful: patients=%d, vitals=%d, "
+            "encounters=%d",
             len(patient_dim),
             len(vitals),
             len(encounter_fact),
@@ -326,13 +341,13 @@ def main() -> None:
 
         logger.info("Published snapshot: %s", snapshot_dir)
         logger.warning(
-            "Outputs use synthetic data. Patient keys are pseudonymous, "
-            "not guaranteed anonymous. Encounter source IDs are retained "
-            "in this development version."
+            "Development data is synthetic. Identifiers are pseudonymous, "
+            "not anonymous. Protect the HMAC secret and restrict access "
+            "to published data."
         )
 
         logger.info(
-            "The dashboard must read the completed snapshot referenced "
+            "Dashboard should read the completed snapshot referenced "
             "by data/processed/manifest.json."
         )
 
