@@ -29,3 +29,9 @@ data/synthetic/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Linux virtual environment
+.venv-linux/
+
+# Generated streaming outputs and checkpoints
+data/streaming/
